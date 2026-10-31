@@ -169,3 +169,74 @@ def verify_equivalence(model, idx, targets, n_stages: int, tol: float = 1e-5):
 def training_memory_bytes(n_params: int) -> int:
     """bf16 weights + fp32 master + Adam m,v  =  2 + 4 + 8 bytes per parameter."""
     return n_params * 14
+
+
+# --------------------------------------------------------------------------
+# Memory accounting
+#
+# The earlier flat "14 bytes per parameter" undercounted: it omitted gradients
+# and all activation memory. Both matter here, because stage count is set by
+# memory and everything downstream follows from stage count.
+# --------------------------------------------------------------------------
+
+@dataclass
+class MemoryConfig:
+    """Per-parameter training state, in bytes, plus how it is distributed."""
+    name: str
+    weight: int = 2        # bf16 parameters, always resident
+    grad: int = 2          # bf16 gradients, resident through backward
+    master: int = 4        # fp32 master copy; 0 requires stochastic rounding
+    optimizer: int = 8     # Adam m and v; 2 with 8-bit states
+    shard_optimizer: bool = False   # ZeRO-1: split optimizer state across stages
+    caveat: str = ""
+
+    def bytes_per_param(self, n_stages: int) -> float:
+        opt = self.optimizer / n_stages if self.shard_optimizer else self.optimizer
+        return self.weight + self.grad + self.master + opt
+
+
+MEMORY_CONFIGS = [
+    MemoryConfig("fp32 Adam + fp32 master", 2, 2, 4, 8,
+                 caveat="the conservative default"),
+    MemoryConfig("8-bit Adam", 2, 2, 4, 2,
+                 caveat="bitsandbytes; near-parity quality, production-ready"),
+    MemoryConfig("8-bit Adam, no fp32 master", 2, 2, 0, 2,
+                 caveat="needs stochastic rounding or updates stall in bf16"),
+    MemoryConfig("8-bit Adam + ZeRO-1 across the island", 2, 2, 0, 2, True,
+                 caveat="optimizer step needs a gather; adds a sync per step"),
+]
+
+
+def activation_bytes(layers_per_stage: float, in_flight: int,
+                     micro_batch: int, seq: int, d_model: int,
+                     dtype_bytes: int = 2) -> int:
+    """Activation memory with checkpointing: one saved tensor per layer
+    boundary, times the micro-batches a stage holds in flight.
+
+    1F1B schedules leave the first stage holding up to n_stages micro-batches,
+    which is the worst case we size for.
+    """
+    per_micro = layers_per_stage * micro_batch * seq * d_model * dtype_bytes
+    return int(in_flight * per_micro)
+
+
+def solve_min_stages(params: float, d_model: int, n_layer: int,
+                     mem: MemoryConfig, budget_bytes: float,
+                     micro_batch: int = 1, seq: int = 2048):
+    """Fewest stages that fit, accounting for the fact that sharding the
+    optimizer makes bytes-per-parameter itself depend on the stage count.
+
+    Returns (n_stages, detail) or (None, None) if no split fits.
+    """
+    for s in range(1, n_layer + 1):
+        bpp = mem.bytes_per_param(s)
+        state = (params / s) * bpp
+        act = activation_bytes(n_layer / s, s, micro_batch, seq, d_model)
+        if state + act <= budget_bytes:
+            return s, {
+                "bytes_per_param": round(bpp, 2),
+                "state_gb": round(state / 1e9, 2),
+                "activation_gb": round(act / 1e9, 2),
+                "total_gb": round((state + act) / 1e9, 2),
+            }
+    return None, None

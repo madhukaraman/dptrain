@@ -108,27 +108,44 @@ therefore caps a stage at ~1.7B parameters **regardless of how big the model is*
 is forced to scale with the model, and per-stage compute stays pinned near the memory budget while
 boundary traffic keeps growing with `d_model`.
 
-Projected on an RTX 4090, 110 Mb/s uplink, int8 activations, micro-batch 1×2048:
+Projected on an RTX 4090, 110 Mb/s uplink, int8 activations, micro-batch 1×2048. Memory is counted
+honestly — bf16 weights, bf16 gradients, the master copy, optimizer state, and activation memory
+under a 1F1B schedule:
 
-| Model | Min stages for 24GB | Params/stage | Boundary | Intensity | Utilization | Island uptime @95% |
+| Model | Memory config | Stages | B/param | Util | Island @95% | +2× redundancy |
 |---|---|---|---|---|---|---|
-| 7B | 5 | 1.40B | 16.8 MB | 1,025,391 | **22.9%** | 77.4% (98.8% at 2× redundancy) |
-| 13B | 8 | 1.63B | 20.9 MB | 952,148 | **21.5%** | 66.3% (98.0%) |
-| 70B | 41 | 1.71B | 33.5 MB | 625,238 | **14.4%** | 12.2% (90.2%) |
+| **7B** | fp32 Adam + fp32 master | 5 | 16.0 | 22.9% | 77.4% | 98.8% |
+| | 8-bit Adam | 3 | 10.0 | 38.2% | 85.7% | 99.3% |
+| | 8-bit Adam, no fp32 master | **2** | 6.0 | **57.3%** | 90.2% | 99.5% |
+| **13B** | fp32 Adam + fp32 master | 9 | 16.0 | 19.1% | 63.0% | 97.8% |
+| | 8-bit Adam, no fp32 master | 4 | 6.0 | 43.1% | 81.5% | 99.0% |
+| | + ZeRO-1 across the island | **3** | 4.7 | **57.4%** | 85.7% | 99.3% |
+| **70B** | fp32 Adam + fp32 master | 53 | 16.0 | 11.2% | 6.6% | 87.6% |
+| | 8-bit Adam | 33 | 10.0 | 17.9% | 18.4% | 92.1% |
+| | 8-bit Adam, no fp32 master | 20 | 6.0 | 29.5% | 35.8% | 95.1% |
+| | + ZeRO-1 across the island | **14** | 4.1 | **42.2%** | 48.8% | 96.6% |
 
-From 7B to 70B, params per stage rises only 1.22× while boundary traffic doubles. Net intensity is
-**1.64× worse for the larger model.**
+### The constraint was never bandwidth
 
-### The conclusion
+Boundary traffic never changes across any row — it is fixed by `d_model` and sequence length. Every
+gain comes from fitting more layers per card, which raises per-stage compute while the wire cost
+stays flat.
 
-**Pipeline parallelism over consumer links works best precisely where you don't need it.** Small
-models pipeline efficiently and also fit on one card; large models need it and pipeline badly.
+So the binding constraint on decentralized pipeline training is **optimizer state**, not the
+network. Cutting it from 16 to ~4 bytes per parameter roughly triples utilization and takes a 70B
+from 53 stages to 14.
 
-A 70B needs 41 consumer cards minimum just to hold optimizer state, runs at 14.4% utilization, and
-at 95% per-device uptime the island is up 12.2% of the time — so 2× stage redundancy is mandatory,
-putting the real cost at 82 cards for one-seventh of their nominal throughput.
+Two 4090s can train a 7B at 57% utilization. A 70B needs 14 cards at 42%, or 28 with the stage
+redundancy its 48.8% island uptime demands.
 
-That answers the question in the heading: technically yes, economically no.
+### What this does not model
+
+- **8-bit Adam has a small quality cost** that none of these numbers capture.
+- **Dropping the fp32 master needs stochastic rounding**, or bf16 updates silently stall.
+- **ZeRO-1 adds a gather per optimizer step** whose communication cost is not modelled here.
+
+So treat the optimized rows as an **upper bound**. The direction is solid; the exact numbers are
+optimistic.
 
 ---
 
