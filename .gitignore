@@ -5,3 +5,7 @@ __pycache__/
 sweep*.log
 report_*.json
 diloco_report.json
+
+# Drafts, planning and launch copy — never publish
+_private/
+*.draft.md
