@@ -138,6 +138,35 @@ from 53 stages to 14.
 Two 4090s can train a 7B at 57% utilization. A 70B needs 14 cards at 42%, or 28 with the stage
 redundancy its 48.8% island uptime demands.
 
+### Measured: what low-memory states actually cost
+
+The projection above assumed 8-bit moments and a dropped fp32 master were viable. Both are
+numerical-precision questions, so they reproduce at toy scale. `dptrain.lowmem` implements them
+from scratch — blockwise int8 moments (second moment held in sqrt space, since it spans orders of
+magnitude and linear int8 across that range is useless) and bf16 masters with optional stochastic
+rounding. Single-worker training, 600 steps, mean of 3 seeds:
+
+| Optimizer state | B/param | Quality vs fp32 | Verdict |
+|---|---|---|---|
+| fp32 Adam + fp32 master | 16 | — | baseline |
+| int8 Adam + fp32 master | 10 | **+0.11%** | free |
+| int8 Adam + bf16 master, nearest rounding | 6 | **+12.35%** | broken |
+| int8 Adam + bf16 master, stochastic rounding | 6 | **+0.14%** | free |
+
+So the memory reduction behind the pipeline result is real — **16 → 6 bytes per parameter for about
+a tenth of a percent of quality** — but stochastic rounding is load-bearing, not a detail.
+
+The mechanism is visible without training anything. bf16 is the top 16 bits of fp32, so truncation
+rounds toward zero and any update smaller than one ULP of the weight disappears. Applying a 1e-6
+update to random weights:
+
+| Rounding | Updates that survive |
+|---|---|
+| nearest (truncation) | **0.1%** |
+| stochastic | **33.3%** |
+
+Get this wrong and training does not crash — it quietly converges 12% worse.
+
 ### What this does not model
 
 - **8-bit Adam has a small quality cost** that none of these numbers capture.
