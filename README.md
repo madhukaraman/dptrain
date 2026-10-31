@@ -157,3 +157,7 @@ the copies diverge.
 - [INTELLECT-1 Technical Report](https://arxiv.org/abs/2412.01152)
 - [Covenant-72B: Pre-Training a 72B LLM with Trustless Peers Over-the-Internet](https://arxiv.org/abs/2603.08163)
 - [SWARM Parallelism](https://arxiv.org/pdf/2301.11913)
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).
