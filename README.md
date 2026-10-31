@@ -75,6 +75,63 @@ likely narrow the gap.
 
 ---
 
+## Can a 24GB card join a run it can't hold?
+
+The question DiLoCo can't answer: every peer needs a full replica, so the floor is
+"train the whole model alone". Pipeline parallelism is the only way under that floor — each peer
+owns a slice of layers and passes activations on.
+
+`dptrain.pipeline` implements it for real. Activations are detached at each boundary, which severs
+the autograd graph exactly as a machine boundary would, so the backward pass is walked stage by
+stage. Gradients come out **bit-identical to monolithic autograd** at 2, 4 and 8 stages
+(`verify_equivalence`, max delta 0.0e+00) — without that check the byte counts would describe a
+model that trains differently from the one being claimed.
+
+### Arithmetic intensity does scale with d_model
+
+At a **fixed** stage count, boundary traffic grows with `d_model` while stage compute grows with
+`d_model²`, so intensity should be linear in `d_model`. Measured, 4 stages, 8 layers:
+
+| d_model | FLOP/byte | vs d_model=64 | ideal |
+|---|---|---|---|
+| 64 | 1,227 | 1.00× | 1× |
+| 128 | 2,379 | 1.94× | 2× |
+| 256 | 4,683 | 3.82× | 4× |
+| 512 | 9,291 | 7.57× | 8× |
+
+Essentially linear. Which suggests bigger models are more pipeline-friendly.
+
+### But you cannot hold the stage count fixed
+
+Training state costs ~14 bytes per parameter (bf16 weights, fp32 master, Adam m and v). A 24GB card
+therefore caps a stage at ~1.7B parameters **regardless of how big the model is** — so stage count
+is forced to scale with the model, and per-stage compute stays pinned near the memory budget while
+boundary traffic keeps growing with `d_model`.
+
+Projected on an RTX 4090, 110 Mb/s uplink, int8 activations, micro-batch 1×2048:
+
+| Model | Min stages for 24GB | Params/stage | Boundary | Intensity | Utilization | Island uptime @95% |
+|---|---|---|---|---|---|---|
+| 7B | 5 | 1.40B | 16.8 MB | 1,025,391 | **22.9%** | 77.4% (98.8% at 2× redundancy) |
+| 13B | 8 | 1.63B | 20.9 MB | 952,148 | **21.5%** | 66.3% (98.0%) |
+| 70B | 41 | 1.71B | 33.5 MB | 625,238 | **14.4%** | 12.2% (90.2%) |
+
+From 7B to 70B, params per stage rises only 1.22× while boundary traffic doubles. Net intensity is
+**1.64× worse for the larger model.**
+
+### The conclusion
+
+**Pipeline parallelism over consumer links works best precisely where you don't need it.** Small
+models pipeline efficiently and also fit on one card; large models need it and pipeline badly.
+
+A 70B needs 41 consumer cards minimum just to hold optimizer state, runs at 14.4% utilization, and
+at 95% per-device uptime the island is up 12.2% of the time — so 2× stage redundancy is mandatory,
+putting the real cost at 82 cards for one-seventh of their nominal throughput.
+
+That answers the question in the heading: technically yes, economically no.
+
+---
+
 ## Install
 
 ```bash
