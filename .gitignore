@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+.idea/
+sweep*.log
+report_*.json
+diloco_report.json
