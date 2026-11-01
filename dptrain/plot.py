@@ -140,3 +140,39 @@ if __name__ == "__main__":
     store = os.environ.get("BB_THREAD_STORAGE", "/tmp")
     main(sys.argv[1] if len(sys.argv) > 1 else os.path.join(store, "summary.json"),
          sys.argv[2] if len(sys.argv) > 2 else "docs")
+
+
+def memory_quality(theme, out, results=None):
+    """Quality cost of each optimizer-state config. One bar towers; that is
+    the finding, so it gets the status colour and everyone else stays neutral."""
+    th = THEMES[theme]
+    bad = "#e34948" if theme == "light" else "#e66767"
+    results = results or [
+        ("fp32 Adam\nfp32 master", 16, 0.00),
+        ("int8 Adam\nfp32 master", 10, 0.11),
+        ("int8 Adam, bf16\nnearest rounding", 6, 12.35),
+        ("int8 Adam, bf16\nstochastic rounding", 6, 0.14),
+    ]
+    labels = [r[0] for r in results]
+    vals = [r[2] for r in results]
+    colors = [bad if v > 1 else th["series"][0] for v in vals]
+
+    fig, ax = plt.subplots(figsize=(8.2, 4.2), dpi=200)
+    bars = ax.bar(range(len(vals)), vals, color=colors, width=0.56)
+    for i, (b, (lab, bpp, v)) in enumerate(zip(bars, results)):
+        ax.annotate(f"+{v:.2f}%", xy=(i, v), xytext=(0, 5),
+                    textcoords="offset points", ha="center",
+                    color=colors[i], fontsize=10, fontweight="bold")
+        ax.annotate(f"{bpp} B/param", xy=(i, 0), xytext=(0, -34),
+                    textcoords="offset points", ha="center",
+                    color=th["text2"], fontsize=9)
+    ax.set_xticks(range(len(labels)))
+    ax.set_xticklabels(labels, fontsize=9, color=th["text2"])
+    _style(ax, th, "", "Held-out loss vs fp32 baseline (%)")
+    ax.set_ylim(0, 14.5)
+    ax.tick_params(axis="x", pad=8)
+    ax.set_title("Cutting optimizer memory is free — if you round stochastically",
+                 color=th["text"], fontsize=12, fontweight="bold", loc="left", pad=12)
+    fig.subplots_adjust(bottom=0.26)
+    fig.savefig(out, facecolor=th["surface"], bbox_inches="tight")
+    plt.close(fig)
