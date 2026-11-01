@@ -178,6 +178,42 @@ optimistic.
 
 ---
 
+## Real sockets, not a simulation
+
+Everything above counts bytes and projects time. `dptrain.distpipe` actually sends them: one OS
+process per stage, real TCP, real serialization. Each rank builds the whole model from a shared
+seed and owns one slice of layers, so only activations and their gradients cross the wire.
+
+    python -m dptrain.distpipe --stages 2 --steps 20 --mbps 110 --rtt-ms 80
+
+Two results from it.
+
+**The byte counts were right.** The simulator predicted 524,288 bytes per boundary per step;
+524,336 actually crossed TCP — the difference is 48 bytes of framing headers. Gradients remain
+bit-identical to monolithic autograd (max delta 0.0e+00, all 69 parameters) at 2 and 4 stages.
+
+**The analytic model is optimistic by about 13%.** Measured against an emulated 110 Mb/s / 80ms
+link:
+
+| Config | Compute/step | Total/step | Measured util | Analytic util | Model error |
+|---|---|---|---|---|---|
+| 2 stages | 28.4 ms | 166.8 ms | 17.1% | 19.4% | +13.8% |
+| 4 stages | 47.3 ms | 451.6 ms | 10.5% | 11.8% | +12.4% |
+
+Consistent across stage counts, which is what you want from a correction factor. The gap is
+sleep-timer overshoot in the emulated link (~4ms per call on macOS) rather than a flaw in the
+model — but a real network adds congestion control and loss on top, so treat every projected
+utilization in this README as an upper bound.
+
+The throttle sleeps *before* `sendall`, not after. Sleeping afterwards leaves the bytes already
+delivered, so the peer runs on while the sender waits — that measures sender occupancy rather than
+link delay, and understated step latency by roughly 4x before it was fixed.
+
+**Security.** Binds `127.0.0.1` by default and there is no authentication. Running across two
+machines means pointing `--host` at a routable address; do that only on a trusted network.
+
+---
+
 ## Install
 
 ```bash
